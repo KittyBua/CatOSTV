@@ -93,6 +93,9 @@ while the app is open, turns it on or off for that app for good.
 
 ## Android apps
 
+Use the main volume panel for Android apps too. Android's media volume is
+automatically kept at maximum, so volume and mute use the same control.
+
 Everything about Android (setup, Google Play or Aurora Store, installing
 APKs, fixing problems) is in **[the Android guide](ANDROID.md)**.
 
@@ -105,7 +108,8 @@ Open the address in your phone's browser on the same Wi-Fi. It has a
 touchpad and a keyboard.
 
 - **Casting**: apps that "play to" a DLNA device see the TV as
-  **CatosTV**. Casting from the YouTube app plays in CatTube.
+  **CatosTV**. Casting from the YouTube app plays in CatTube. Turn casting
+  on or off with **Settings → Cast & remote → Cast to this TV**.
 - **KDE Connect**: the TV shows up as **CatosTV**. Pair it from the phone
   and accept on the TV. KDE Connect's own mouse and keyboard remote doesn't
   work; use the phone remote instead.
