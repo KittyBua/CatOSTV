@@ -319,7 +319,7 @@ fn spawn_app_watcher(
                 }
             }
             let events = lock(&manager).poll();
-            let (fg, android_front, appliance, hidden, fg_window, mouse) = {
+            let (fg, android_front, appliance, mut hidden, fg_window, mouse) = {
                 let w = lock(&watch);
                 (
                     w.foreground.clone(),
@@ -395,6 +395,11 @@ fn spawn_app_watcher(
                 lock(&watch).blank.is_none(),
                 android_front,
             );
+            // The requested Android window is already active. Route input
+            // to it now, without waiting for the render-idle timeout.
+            if android_front && android_on_top && recovery.is_none() {
+                hidden = true;
+            }
             if fg != front_app {
                 front_app = fg.clone();
                 last_window = None;
@@ -804,6 +809,8 @@ struct ShellApp {
     /// The Waydroid session was started by this shell instance (once, at
     /// start-up or right after setup) so Android apps open without delay.
     android_started: bool,
+    /// Home commands to finish before an app is brought forward again.
+    android_home: Vec<android::HomeRequest>,
     /// Android apps launched since the session started (shown as running,
     /// closable from Recents). Cleared when the Android session ends.
     android_running: Vec<String>,
@@ -1146,6 +1153,7 @@ impl ShellApp {
             foreground: None,
             pending_restart: HashSet::new(),
             android_started: false,
+            android_home: Vec::new(),
             android_running: Vec::new(),
             store_shots: HashMap::new(),
             launching: None,
@@ -1578,9 +1586,19 @@ impl ShellApp {
 
     /// You left an Android app for CatosTV: Android goes to its own home
     /// screen, so the app pauses (see android-home).
-    fn send_android_home(&self) {
+    fn send_android_home(&mut self) {
         if self.appliance && self.sys.android.session {
-            self.job(|r| r.run_ok(&android::home_cmd()).map(|_| ()));
+            let (sent, received) = std::sync::mpsc::channel();
+            self.android_home.push(received);
+            self.jobs.spawn(move || {
+                let result = SystemRunner.run_ok(&android::home_cmd()).map(|_| ());
+                let message = match &result {
+                    Ok(()) => Msg::Nothing,
+                    Err(e) => Msg::Toast(e.to_string()),
+                };
+                let _ = sent.send(result);
+                message
+            });
         }
     }
 
@@ -1601,6 +1619,10 @@ impl ShellApp {
     /// (the desktop alone showed whichever app was on
     /// top, FreeTube instead of the Android app just opened).
     fn show_app(&self, app_id: &str) {
+        self.show_app_when_ready(app_id, ANDROID_FIRST_FRAME);
+    }
+
+    fn show_app_when_ready(&self, app_id: &str, android_stable: Duration) {
         if !self.appliance {
             return;
         }
@@ -1636,6 +1658,7 @@ impl ShellApp {
         let watch = self.watch.clone();
         let (_, ui) = self.jobs.sender();
         self.jobs.spawn(move || {
+            let started = Instant::now();
             // Android shows every app in Waydroid's one full-screen window
             // which takes seconds to appear on a cold start;
             // switching before it exists shows whatever else is on the app
@@ -1649,38 +1672,57 @@ impl ShellApp {
             {
                 return Msg::AndroidNoWindow(name);
             }
+            let window_ready = Instant::now();
             // That one window still shows the app that was in front before
             // until Android has switched (Play Store flashed for a
             // second when SmartTube was opened from Recents, and the other
             // way round). Stay on CatosTV until Android reports the app in
-            // front. The launch helper waits for its first draw; also keep
-            // checking focus through the handover interval, since Android
-            // may still be finishing a preceding Home request.
+            // front. Confirmed launches already waited for their first
+            // draw and preceding Home requests. Other reveal paths still
+            // require settled focus before showing the shared window.
             if let Some(pkg) = package.as_deref().filter(|_| android)
-                && !wait_for_android_top(pkg, ANDROID_TOP_WAIT)
+                && !wait_for_android_top(pkg, ANDROID_TOP_WAIT, android_stable)
             {
                 return Msg::AndroidDidNotStart(pkg.to_string());
             }
+            let focus_ready = Instant::now();
             // A blank frame first: what the window shows when it goes
             // behind the app is what flashes up when it next comes over it.
             wait_for_blank(&watch, &ui);
-            let switched = compositor::show_app_workspace(&mut SystemRunner, true);
+            let blank_ready = Instant::now();
+            // Activating Android's own window also selects its desktop.
+            // A keyboard desktop switch first adds another handover.
+            let switched = if let Some(w) = window.as_deref().filter(|_| android) {
+                match catostv_core::toplevel::activate(w) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        lock(&watch).blank = None;
+                        return Msg::AndroidNoWindow(name);
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                compositor::show_app_workspace(&mut SystemRunner, true)
+            };
             if switched.is_err() {
                 lock(&watch).blank = None;
             }
-            if let Some(w) = window {
-                if android {
-                    // Raised only if it is not in front already; never
-                    // minimized or closed.
-                    let _ = catostv_core::toplevel::raise_if_needed(&w);
-                } else {
-                    let player = players
-                        .iter()
-                        .any(|p| catostv_core::toplevel::activate(p).unwrap_or(false));
-                    if !player {
-                        let _ = catostv_core::toplevel::activate(&w);
-                    }
+            if let Some(w) = window.filter(|_| !android) {
+                let player = players
+                    .iter()
+                    .any(|p| catostv_core::toplevel::activate(p).unwrap_or(false));
+                if !player {
+                    let _ = catostv_core::toplevel::activate(&w);
                 }
+            }
+            if let Some(pkg) = package.as_deref().filter(|_| android) {
+                eprintln!(
+                    "catostv: {pkg} shown: window {} ms, focus {} ms, blank {} ms, switch {} ms",
+                    window_ready.duration_since(started).as_millis(),
+                    focus_ready.duration_since(window_ready).as_millis(),
+                    blank_ready.duration_since(focus_ready).as_millis(),
+                    blank_ready.elapsed().as_millis(),
+                );
             }
             match switched {
                 Ok(()) => Msg::AppShown,
@@ -1840,8 +1882,8 @@ impl ShellApp {
         true
     }
 
-    /// Run an Android task once Android has really booted (it answers
-    /// `waydroid app list`), on a background job. CatosTV stays in front
+    /// Run an Android task on a background job. Cold launches wait until
+    /// Android answers; warm launches use the boot watcher's status. CatosTV stays in front
     /// until the app has been launched (switching
     /// early showed whatever app was last on the app desktop).
     fn android(&mut self, ctx: &egui::Context, task: AndroidTask) {
@@ -1867,8 +1909,33 @@ impl ShellApp {
             return;
         }
         let home = self.home.clone();
+        let home_requests = if matches!(task, AndroidTask::Launch(_) | AndroidTask::OpenAurora) {
+            std::mem::take(&mut self.android_home)
+        } else {
+            Vec::new()
+        };
         self.jobs.spawn(move || {
             let mut r = SystemRunner;
+            let launch = |r: &mut dyn Runner, pkg: &str| -> Msg {
+                let result = android::open_app(
+                    r,
+                    pkg,
+                    &home_requests,
+                    android::is_booted(),
+                    android::read_top().as_deref(),
+                    &mut std::thread::sleep,
+                );
+                match result {
+                    Ok(()) => Msg::AndroidOpened(pkg.to_string()),
+                    Err(e) if e.to_string().contains("timed out") => Msg::Toast(
+                        "Android is not responding. Settings → Android → Reset Android".into(),
+                    ),
+                    Err(e) => Msg::Toast(e.to_string()),
+                }
+            };
+            if let AndroidTask::Launch(pkg) = &task {
+                return launch(&mut r, pkg);
+            }
             let mut sleep = |d: Duration| std::thread::sleep(d);
             let apps = match android::wait_until_ready(&mut r, android::READY_TIMEOUT, &mut sleep) {
                 Ok(apps) => apps,
@@ -1892,30 +1959,8 @@ impl ShellApp {
             if tv_changed {
                 eprintln!("catostv: Android icons updated ({} apps)", apps.len());
             }
-            let launch = |pkg: &str| -> Msg {
-                // Already Android's front app (CatosTV Home was over it):
-                // just show it. A fresh `am start` stacked a new splash on
-                // SmartTube's running player, and its decoder deadlocked
-                // in the restart.
-                if android::read_top().as_deref() == Some(pkg) {
-                    return Msg::AndroidOpened(pkg.to_string());
-                }
-                // Always through android-launch: it keeps Android in
-                // full-screen mode (`waydroid app launch` asks for the
-                // app's own window, which never opens on the Android TV 16
-                // image), falls back to the phone launcher entry,
-                // and records what was running before.
-                match android::tv_launch_cmd(pkg).and_then(|c| SystemRunner.run_ok(&c).map(|_| ()))
-                {
-                    Ok(()) => Msg::AndroidOpened(pkg.to_string()),
-                    Err(e) if e.to_string().contains("timed out") => Msg::Toast(
-                        "Android is not responding. Settings → Android → Reset Android".into(),
-                    ),
-                    Err(e) => Msg::Toast(e.to_string()),
-                }
-            };
             match task {
-                AndroidTask::Launch(pkg) => launch(&pkg),
+                AndroidTask::Launch(_) => unreachable!("launch handled before app refresh"),
                 AndroidTask::InstallApk(path) => {
                     // Through Android's package manager as root
                     // (Waydroid's own install service is broken on the TV
@@ -1937,7 +1982,7 @@ impl ShellApp {
                     }
                 }
                 AndroidTask::OpenAurora => match android::install_aurora_if_missing(&mut r) {
-                    Ok(_) => launch(android::AURORA_PACKAGE),
+                    Ok(_) => launch(&mut r, android::AURORA_PACKAGE),
                     Err(e) => Msg::Toast(e.to_string()),
                 },
                 // Installing it makes Waydroid write its .desktop file, so
@@ -3456,7 +3501,10 @@ impl ShellApp {
                     .map(|a| a.id.clone())
                     .or_else(|| Some(android::SESSION_APP_ID.to_string()));
                 let front = self.foreground.clone().unwrap_or_default();
-                self.show_app(&front);
+                // The launcher has waited for the first draw and earlier
+                // Home requests. Wait for its focus report without adding
+                // another half second after the app is ready.
+                self.show_app_when_ready(&front, Duration::ZERO);
             }
             Msg::Lifecycle(ev) => self.handle_lifecycle(ctx, ev),
             Msg::ApkDone(text) => {
@@ -4814,11 +4862,11 @@ fn refit_full_screen(
 /// How long to wait for Android to report the opened app in front (a
 /// cold start of a big app such as YouTube takes several seconds).
 const ANDROID_TOP_WAIT: Duration = Duration::from_secs(12);
-/// Require continuous app focus after its first draw before revealing Android.
+/// Settle focus for Android windows revealed without a confirmed launch.
 const ANDROID_FIRST_FRAME: Duration = Duration::from_millis(500);
 
 /// Wait until `android-watch` reports `pkg` as Android's front app.
-fn wait_for_android_top(pkg: &str, budget: Duration) -> bool {
+fn wait_for_android_top(pkg: &str, budget: Duration, stable: Duration) -> bool {
     let started = Instant::now();
     let mut ready = android::LaunchReady::default();
     loop {
@@ -4826,14 +4874,14 @@ fn wait_for_android_top(pkg: &str, budget: Duration) -> bool {
             pkg,
             android::read_top().as_deref(),
             started.elapsed(),
-            ANDROID_FIRST_FRAME,
+            stable,
         ) {
             return true;
         }
         if started.elapsed() >= budget {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

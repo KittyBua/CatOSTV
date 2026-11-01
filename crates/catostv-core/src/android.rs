@@ -813,6 +813,35 @@ pub fn tv_launch_cmd(pkg: &str) -> Result<Cmd> {
         .timeout(WAYDROID_TIMEOUT))
 }
 
+/// Reopen an app without refreshing Android's app list or icons. A cold
+/// session still has to answer before its launcher can be used.
+/// Home requests must finish first; their last focus report can be stale.
+pub fn open_app(
+    r: &mut dyn Runner,
+    pkg: &str,
+    home_requests: &[HomeRequest],
+    booted: bool,
+    top: Option<&str>,
+    sleep: &mut dyn FnMut(Duration),
+) -> Result<()> {
+    check_package(pkg)?;
+    for home in home_requests {
+        home.recv_timeout(WAYDROID_TIMEOUT)
+            .map_err(|_| Error::msg("Android Home did not finish"))??;
+    }
+    if !booted {
+        wait_until_ready(r, READY_TIMEOUT, sleep)?;
+    } else if home_requests.is_empty() && top == Some(pkg) {
+        // Home can cover a playing app. Do not send its launcher intent
+        // again: SmartTube can rebuild its player and deadlock its decoder.
+        return Ok(());
+    }
+    r.run_ok(&tv_launch_cmd(pkg)?).map(|_| ())
+}
+
+/// Completion of a Home command dispatched by the shell.
+pub type HomeRequest = std::sync::mpsc::Receiver<Result<()>>;
+
 /// Which Android app is in front, published by the root service
 /// catostv-android-watch (`/run/catostv/android-top`, one package name).
 pub const TOP_PATH: &str = "/run/catostv/android-top";
@@ -1095,12 +1124,7 @@ pub const STOP_UNIT_PREFIX: &str = "catostv-android-stop@";
 /// Android app for CatosTV, so the app pauses as on a real Android TV.
 pub fn home_cmd() -> Cmd {
     Cmd::new("systemctl")
-        .args([
-            "--no-ask-password",
-            "start",
-            "--no-block",
-            "catostv-android-home.service",
-        ])
+        .args(["--no-ask-password", "start", "catostv-android-home.service"])
         .timeout(SLOW)
 }
 
@@ -1680,6 +1704,19 @@ pub fn removable_apks(r: &mut dyn Runner) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn drawn_app_is_ready_without_a_hold_only_when_its_focus_matches() {
+        let mut ready = LaunchReady::default();
+        let app = "org.smarttube.stable";
+        let mut at = |ms, top| ready.observe(app, top, Duration::from_millis(ms), Duration::ZERO);
+        assert!(!at(0, Some("com.android.vending")));
+        assert!(!at(20, None));
+        assert!(!at(40, Some("org.lineageos.tv.launcher")));
+        assert!(at(60, Some(app)));
+        assert!(!at(80, Some("com.android.vending")));
+        assert!(at(100, Some(app)));
+    }
 
     #[test]
     fn launch_waits_for_continuous_app_focus() {
@@ -2559,6 +2596,238 @@ NAME="sr0" KNAME="sr0" PATH="/dev/sr0" PKNAME="" TYPE="rom" SIZE="1073741312" RO
         assert!(is_android_home("com.android.launcher3"));
         assert!(is_android_home("org.lineageos.trebuchet"));
         assert!(!is_android_home("org.smarttube.stable"));
+    }
+
+    #[test]
+    fn warm_open_does_not_list_apps_or_relaunch_the_front_app() {
+        let mut r = FakeRunner::new();
+        let mut no_sleep = |_| panic!("a booted Android app must not wait for readiness");
+        for pkg in ["org.smarttube.stable", "com.android.vending"] {
+            open_app(&mut r, pkg, &[], true, Some(pkg), &mut no_sleep).unwrap();
+            assert!(r.seen.is_empty());
+        }
+        open_app(
+            &mut r,
+            "org.smarttube.stable",
+            &[],
+            true,
+            Some("com.android.vending"),
+            &mut no_sleep,
+        )
+        .unwrap();
+        assert_eq!(r.seen, vec![tv_launch_cmd("org.smarttube.stable").unwrap()]);
+    }
+
+    #[test]
+    fn cold_open_waits_for_android_even_if_an_old_top_record_matches() {
+        let mut r = FakeRunner::new();
+        r.push(Output::ok(""));
+        r.push(Output::ok(APP_LIST));
+        let mut slept = Duration::ZERO;
+        open_app(
+            &mut r,
+            "com.android.vending",
+            &[],
+            false,
+            Some("com.android.vending"),
+            &mut |d| slept += d,
+        )
+        .unwrap();
+        assert_eq!(slept, READY_POLL);
+        assert_eq!(r.seen.len(), 3);
+        assert_eq!(r.seen[0], list_apps_cmd());
+        assert_eq!(r.seen[1], list_apps_cmd());
+        assert_eq!(r.seen[2], tv_launch_cmd("com.android.vending").unwrap());
+    }
+
+    #[test]
+    fn open_rejects_bad_packages_and_reports_launch_or_boot_failures() {
+        let mut r = FakeRunner::new();
+        assert!(open_app(&mut r, "bad;rm", &[], true, Some("bad;rm"), &mut |_| {}).is_err());
+        assert!(r.seen.is_empty());
+        r.push(Output::failed(1, "Android launch failed"));
+        assert!(
+            open_app(&mut r, "com.android.vending", &[], true, None, &mut |_| {})
+                .unwrap_err()
+                .message()
+                .contains("Android launch failed")
+        );
+        let mut r = FakeRunner::new();
+        let err =
+            open_app(&mut r, "com.android.vending", &[], false, None, &mut |_| {}).unwrap_err();
+        assert!(err.message().contains("Android is still starting"));
+        assert!(r.seen.iter().all(|cmd| *cmd == list_apps_cmd()));
+    }
+
+    #[test]
+    fn reopen_waits_for_all_home_commands_and_ignores_the_old_front_app() {
+        use std::sync::mpsc;
+        let (first_sent, first) = mpsc::channel();
+        let (last_sent, last) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        first_sent.send(Ok(())).unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut r = FakeRunner::new();
+            let opened = open_app(
+                &mut r,
+                "org.smarttube.stable",
+                &[first, last],
+                true,
+                Some("org.smarttube.stable"),
+                &mut |_| panic!("warm reopen must not poll app discovery"),
+            );
+            finished.send((opened, r.seen)).unwrap();
+        });
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        last_sent.send(Ok(())).unwrap();
+        let (opened, seen) = result.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        opened.unwrap();
+        assert_eq!(seen, vec![tv_launch_cmd("org.smarttube.stable").unwrap()]);
+        assert_eq!(
+            home_cmd().args,
+            ["--no-ask-password", "start", "catostv-android-home.service"]
+        );
+    }
+
+    #[test]
+    fn unfinished_or_failed_home_does_not_open_an_app_over_it() {
+        use std::sync::mpsc;
+        for response in [Some(Err(Error::msg("Home failed"))), None] {
+            let (sent, pending) = mpsc::channel();
+            if let Some(response) = response {
+                sent.send(response).unwrap();
+            }
+            drop(sent);
+            let mut r = FakeRunner::new();
+            assert!(
+                open_app(
+                    &mut r,
+                    "com.android.vending",
+                    &[pending],
+                    true,
+                    Some("org.smarttube.stable"),
+                    &mut |_| {},
+                )
+                .is_err()
+            );
+            assert!(r.seen.is_empty());
+        }
+    }
+
+    #[test]
+    fn launch_helper_runs_tv_and_phone_intents_directly_and_keeps_task_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempDir::new("android-launch");
+        let fake = t.path().join("lxc-attach");
+        std::fs::write(
+            &fake,
+            r##"#!/bin/bash
+printf '%s\n' "$*" >>"$LAUNCH_CALLS"
+while [[ $# -gt 0 && $1 != -- ]]; do shift; done
+shift
+case "$1" in
+  /system/bin/cmd)
+    [[ "$LAUNCH_CASE" == missing ]] && exit 0
+    [[ "$LAUNCH_CASE" == phone && "$*" == *LEANBACK_LAUNCHER* ]] && exit 0
+    printf '%s/.Main\r\n' "${!#}"
+    ;;
+  /system/bin/dumpsys)
+    printf '  * Task{a #2 type=standard A=10001:com.android.vending U=0}\r\n'
+    printf '  * Task{b #1 type=standard A=10002:org.smarttube.stable U=0}\r\n'
+    ;;
+  /system/bin/am)
+    [[ "$LAUNCH_CASE" == failed ]] && exit 7
+    ;;
+esac
+exit 0
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = t.path().join("launch");
+        let record = t.path().join("run");
+        std::fs::write(
+            &script,
+            include_str!("../../../target-root/usr/local/lib/catostv/android-launch")
+                .replace("/run/catostv", record.to_str().unwrap()),
+        )
+        .unwrap();
+        let calls = t.path().join("calls");
+        let run = |pkg: &str, case: &str| {
+            let _ = std::fs::remove_file(&calls);
+            std::process::Command::new("bash")
+                .arg(&script)
+                .arg(pkg)
+                .env(
+                    "PATH",
+                    format!("{}:{}", t.path().display(), std::env::var("PATH").unwrap()),
+                )
+                .env("LAUNCH_CALLS", &calls)
+                .env("LAUNCH_CASE", case)
+                .output()
+                .unwrap()
+        };
+        for (pkg, case, category, count) in [
+            ("org.smarttube.stable", "tv", "LEANBACK_LAUNCHER", 5),
+            ("com.android.vending", "tv", "LEANBACK_LAUNCHER", 5),
+            ("com.aurora.store", "phone", "LAUNCHER", 6),
+        ] {
+            let result = run(pkg, case);
+            assert!(result.status.success(), "{:?}", result);
+            let seen = std::fs::read_to_string(&calls).unwrap();
+            assert_eq!(seen.lines().count(), count);
+            assert!(
+                seen.lines()
+                    .all(|l| l.starts_with("-P /var/lib/waydroid/lxc -n waydroid --clear-env "))
+            );
+            assert!(seen.contains("-v ANDROID_ROOT=/system -v ANDROID_DATA=/data --"));
+            assert!(seen.contains("/system/bin/setprop waydroid.active_apps Waydroid"));
+            assert!(seen.contains(&format!(
+                "/system/bin/am start -W -a android.intent.action.MAIN -c android.intent.category.{category} -f 0x10200000 -n {pkg}/.Main"
+            )));
+            assert_eq!(
+                std::fs::read_to_string(record.join("android-launched")).unwrap(),
+                format!("{pkg}\ncom.android.vending\norg.smarttube.stable\n")
+            );
+        }
+        assert_eq!(run("bad;rm", "tv").status.code(), Some(2));
+        assert!(!calls.exists());
+        assert_eq!(run("org.example.missing", "missing").status.code(), Some(1));
+        assert!(
+            !std::fs::read_to_string(&calls)
+                .unwrap()
+                .contains("/system/bin/am")
+        );
+        assert_eq!(run("org.example.video", "failed").status.code(), Some(7));
+        let home_script = t.path().join("home");
+        std::fs::write(
+            &home_script,
+            include_str!("../../../target-root/usr/local/lib/catostv/android-home"),
+        )
+        .unwrap();
+        for (case, status) in [("tv", 0), ("failed", 7)] {
+            std::fs::remove_file(&calls).unwrap();
+            let result = std::process::Command::new("bash")
+                .arg(&home_script)
+                .env(
+                    "PATH",
+                    format!("{}:{}", t.path().display(), std::env::var("PATH").unwrap()),
+                )
+                .env("LAUNCH_CALLS", &calls)
+                .env("LAUNCH_CASE", case)
+                .output()
+                .unwrap();
+            assert_eq!(result.status.code(), Some(status));
+            let seen = std::fs::read_to_string(&calls).unwrap();
+            assert_eq!(seen.lines().count(), 1);
+            assert!(seen.contains(
+                "/system/bin/am start -W -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x10200000"
+            ));
+        }
     }
 
     #[test]
