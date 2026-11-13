@@ -1088,7 +1088,7 @@ pub fn has_google_play() -> bool {
 }
 
 /// What Settings shows for an installed image id: "a17-qrp0-gapps" →
-/// "Android TV 16 · Google Play"; a CatosTV-built image
+/// "Android TV 17 · Google Play"; a CatosTV-built image
 /// ("atv16-custom-<build>-gapps") names its build.
 pub fn image_label(id: &str) -> String {
     let (base, store) = match id.rsplit_once('-') {
