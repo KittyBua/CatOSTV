@@ -54,10 +54,10 @@ readonly UI_CONF=/home/catostv/.config/catostv/ui.conf
 # WayDroid-ATV's Android TV 16 channel (LineageOS 23.0;): the
 # newest TV image, with zero-copy video decoding on by default, Catapult
 # as launcher and the Google TV components. (The Android TV 13 channel is
-# the same host without the `a16-tv/` part.)
-readonly OTA_SYSTEM=https://waydroid-atv.github.io/ota/a16-tv/system
-readonly OTA_VENDOR=https://waydroid-atv.github.io/ota/a16-tv/vendor
-readonly IMAGE_TAG=atv16
+# the same host without the `a17-qpr0/` part.)
+readonly OTA_SYSTEM=https://waydroid-atv.github.io/ota/a17-qpr0/system
+readonly OTA_VENDOR=https://waydroid-atv.github.io/ota/a17-qpr0/vendor
+readonly IMAGE_TAG=a17-qpr0
 # A CatosTV-built image: scripts/deploy.sh --android-image puts
 # system.img, vendor.img and BUILD.txt here; Waydroid finds them through
 # the "pre-installed images" link below.
