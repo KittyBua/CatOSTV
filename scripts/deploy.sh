@@ -193,7 +193,7 @@ if [ "$OVERLAY" = 1 ]; then
   # Android TV image: an Android set up from the stock
   # Waydroid image or an older TV image (Android TV 13) is wiped so
   # Settings → Android sets up the current TV image fresh. Apps and sign-ins inside Android go.
-  if sudo test -f /var/lib/waydroid/waydroid.cfg && ! sudo grep -qs '^atv16-' /var/lib/catostv/android/image; then
+  if sudo test -f /var/lib/waydroid/waydroid.cfg && ! sudo grep -qs '^a17-qrp0-' /var/lib/catostv/android/image; then
     WIPE_ANDROID=1
   fi
   if [ "$WIPE_ANDROID" = 1 ] && { sudo test -e /var/lib/waydroid/waydroid.cfg || sudo test -e /var/lib/catostv/android/image; }; then
