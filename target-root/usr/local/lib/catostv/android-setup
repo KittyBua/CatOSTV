@@ -16,8 +16,8 @@
 # Full log: /var/log/catostv-android-setup.log
 # Done marker (survives reboots): /var/lib/catostv/android/setup-done
 #
-# Image: WayDroid-ATV's Android TV 16 (LineageOS 23.0 for TV, release
-# 20260403), a real Android TV with the Catapult launcher,
+# Image: WayDroid-ATV's Android TV 16 (LineageOS 24.0 for TV, release
+# 20261017), a real Android TV with the Catapult launcher,
 # VA-API zero-copy video decoding on Intel/AMD, ARM translation built in,
 # Widevine L3, with or without Google apps
 # (https://github.com/WayDroid-ATV/waydroid-androidtv-builds:
