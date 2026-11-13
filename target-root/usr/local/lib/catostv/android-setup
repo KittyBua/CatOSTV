@@ -63,7 +63,7 @@ readonly IMAGE_TAG=a17-qpr0
 # the "pre-installed images" link below.
 readonly CUSTOM_DIR=$ANDROID_DIR/custom
 readonly PREINSTALLED_LINK=/etc/waydroid-extra/images
-readonly FDROID_API=https://f-droid.org/packages/com.aurora.store
+readonly FDROID_API=https://f-droid.org/api/v1/packages/com.aurora.store
 readonly FDROID_REPO=https://f-droid.org/repo
 readonly TOTAL=5
 
