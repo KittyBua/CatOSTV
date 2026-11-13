@@ -1777,8 +1777,8 @@ mod tests {
         assert!(SETUP_DONE_PATH.starts_with("/var/lib/catostv/android/"));
         assert!(AURORA_APK_PATH.starts_with("/var/lib/catostv/android/"));
         // Android TV image: the OTA channel and both variants.
-        assert!(script.contains("waydroid-atv.github.io/ota/a16-tv/system"));
-        assert!(script.contains("IMAGE_TAG=atv16"));
+        assert!(script.contains("waydroid-atv.github.io/ota/a17-qpr0/system"));
+        assert!(script.contains("IMAGE_TAG=a17-qpr0"));
         assert!(script.contains("atv.setup.bt_remote_pairing false"));
         assert!(script.contains("-s \"$SYSTEM_TYPE\""));
         assert!(script.contains("android_variant"));
@@ -1795,7 +1795,7 @@ mod tests {
         let deploy = include_str!("../../../scripts/deploy.sh");
         assert!(deploy.contains("--android-image"));
         assert!(deploy.contains("/var/lib/catostv/android/custom.new"));
-        assert!(deploy.contains("grep -qs '^atv16-' /var/lib/catostv/android/image"));
+        assert!(deploy.contains("grep -qs '^a17-qpr0-' /var/lib/catostv/android/image"));
         // Steps announced as N/5 must be 1..=5 in order.
         let steps: Vec<u32> = script
             .lines()
