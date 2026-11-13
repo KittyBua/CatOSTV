@@ -968,7 +968,7 @@ fn android_rows_trigger_setup_and_apk_install() {
     );
     assert!(s.overlays.is_empty());
     f.sys.android.initialized = true;
-    f.sys.android_image = Some("atv16-vanilla".into());
+    f.sys.android_image = Some("a17-qpr0-vanilla".into());
     // Status, Install an APK, Repair (no Aurora row:).
     assert_eq!(
         press(&mut s, &f, &[Up, Down, Ok]),
