@@ -1074,7 +1074,7 @@ pub fn read_gsf_id() -> Option<String> {
 }
 
 /// Which image the setup installed (`/var/lib/catostv/android/image`,
-/// e.g. "atv16-gapps"); `None` before the Android TV setup ran.
+/// e.g. "a17-qrp0-gapps"); `None` before the Android TV setup ran.
 pub const IMAGE_PATH: &str = "/var/lib/catostv/android/image";
 
 pub fn installed_image() -> Option<String> {
@@ -1087,7 +1087,7 @@ pub fn has_google_play() -> bool {
     installed_image().is_some_and(|i| i.ends_with("-gapps"))
 }
 
-/// What Settings shows for an installed image id: "atv16-gapps" →
+/// What Settings shows for an installed image id: "a17-qrp0-gapps" →
 /// "Android TV 16 · Google Play"; a CatosTV-built image
 /// ("atv16-custom-<build>-gapps") names its build.
 pub fn image_label(id: &str) -> String {
