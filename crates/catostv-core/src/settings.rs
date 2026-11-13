@@ -56,7 +56,7 @@ pub struct SystemSnapshot {
     pub android_repairing: bool,
     /// Google Play certification id (GApps image), once GMS created it.
     pub gsf_id: Option<String>,
-    /// Which Android image the setup installed ("atv16-gapps", …).
+    /// Which Android image the setup installed ("a17-qrp0-gapps", …).
     pub android_image: Option<String>,
     /// The setup's download so far: (megabytes done, megabytes total),
     /// read from its log while step 2 runs.
