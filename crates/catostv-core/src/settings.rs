@@ -1348,7 +1348,7 @@ mod tests {
         sys.android_download = None;
         sys.android_setup = None;
         sys.android.initialized = true;
-        sys.android_image = Some("atv16-gapps".into());
+        sys.android_image = Some("a17-qpr0-gapps".into());
         let ids: Vec<RowId> = rows(Category::Android, &ctx_with(&sys, &p, &d))
             .iter()
             .map(|r| r.id)
